@@ -1,80 +1,47 @@
 package main
 
 import (
+	"github.braintreeps.com/braintree/intellipair-server/sockethelper"
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"net/http"
 )
 
 func main() {
-	http.HandleFunc("/testSession", serveWs)
-	http.ListenAndServe(":4000", nil)
+	router := mux.NewRouter()
+	router.HandleFunc("/{sessionId}", serveWs)
+	http.ListenAndServe(":4000", router)
 }
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
-var sessions = make(map[string]*session)
+var sessions = make(map[string]*sockethelper.WebsocketSession)
 
 func serveWs(writer http.ResponseWriter, request *http.Request) {
-	// TODO: if sessionId path we already have, add the person as guest
-	// TODO else create a new session with that person as the host
+	vars := mux.Vars(request)
+	sessionId := vars["sessionId"]
+	if sessionId == "" {
+		http.Error(writer, "Invalid sessionid", 400)
+	}
 
 	ws, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
+		panic(err)
 		http.Error(writer, err.Error(), 400)
-	} else {
-		for {
-			_, dat, err := ws.ReadMessage()
-			if err != nil {
-				println(err.Error())
-				ws.Close()
-				return
-			}
-			println(string(dat))
-		}
+		return
 	}
-}
 
-type session struct {
-	host      *websocket.Conn
-	guest     *websocket.Conn
-	sessionId string
-}
-
-func (sess *session) run() {
-	hostChannel := make(chan string)
-	guestChannel := make(chan string)
-
-	go func() {
-		for sess.host != nil {
-			_, dat, err := sess.host.ReadMessage()
-			if err != nil {
-				println(err.Error())
-			} else if sess.guest != nil {
-				guestChannel <- string(dat)
-			}
-		}
-	}()
-
-	go func() {
-		for sess.guest != nil {
-			_, dat, err := sess.guest.ReadMessage()
-			if err != nil {
-				println(err.Error())
-			} else if sess.host != nil {
-				hostChannel <- string(dat)
-			}
-		}
-	}()
-
-	for {
-		select {
-		case message := <-hostChannel:
-			sess.host.WriteMessage(websocket.TextMessage, []byte(message))
-		case message := <-guestChannel:
-			sess.guest.WriteMessage(websocket.TextMessage, []byte(message))
-		}
+	if session, ok := sessions[sessionId]; ok {
+		session.Register <- sockethelper.NewWebsocketReader(ws, session)
+	} else {
+		session := sockethelper.NewWebsocketSession(sessionId)
+		session.Register <- sockethelper.NewWebsocketReader(ws, session)
+		sessions[sessionId] = session
 	}
 }
